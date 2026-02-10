@@ -2,7 +2,7 @@
 
 A lightweight velocity tracker overlay for L8R SK8R.
 
-https://streamable.com/2vbp35
+[![Watch on Streamable](https://img.shields.io/badge/Watch_Demo-Streamable-0080ff?style=for-the-badge&logo=streamable)](https://streamable.com/2vbp35)
 
 ## Features
 - Real-time velocity tracking (Magnitude, X, Y, Z)
