@@ -2,7 +2,7 @@
 
 A lightweight velocity tracker overlay for L8R SK8R.
 
-https://github.com/user-attachments/assets/0885aba6-017c-4316-9499-53dc04e19702
+https://streamable.com/2vbp35
 
 ## Features
 - Real-time velocity tracking (Magnitude, X, Y, Z)
