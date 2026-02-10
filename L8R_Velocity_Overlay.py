@@ -168,15 +168,48 @@ class VelocityOverlay:
         self.show_magnitude = tk.BooleanVar(value=True)
         self.show_vectors = tk.BooleanVar(value=True)
         self.show_graph = tk.BooleanVar(value=True)
+
+        self.graph_show_mag = tk.BooleanVar(value=True)
+        self.graph_show_x = tk.BooleanVar(value=False)
+        self.graph_show_y = tk.BooleanVar(value=False)
+        self.graph_show_z = tk.BooleanVar(value=False)
         
+        self.font_size_mag = tk.IntVar(value=24)
+        self.font_size_vec = tk.IntVar(value=10)
+        self.font_size_peak = tk.IntVar(value=8)
+        
+        self.peak_update_rate = tk.DoubleVar(value=2.0)
+
+        # Apply font updates
+        def update_fonts(*args):
+            self.label_speed.config(font=("Consolas", self.font_size_mag.get(), "bold"))
+            vec_font = ("Consolas", self.font_size_vec.get())
+            self.label_vx.config(font=vec_font)
+            self.label_vy.config(font=vec_font)
+            self.label_vz.config(font=vec_font)
+            self.draw_graph() # Redraw for peak font size
+
         try:
             self.show_magnitude.trace_add("write", lambda *args: self.refresh_layout())
             self.show_vectors.trace_add("write", lambda *args: self.refresh_layout())
             self.show_graph.trace_add("write", lambda *args: self.refresh_layout())
+            
+            self.font_size_mag.trace_add("write", update_fonts)
+            self.font_size_vec.trace_add("write", update_fonts)
+            self.font_size_peak.trace_add("write", lambda *args: self.draw_graph())
+            self.peak_update_rate.trace_add("write", lambda *args: self.draw_graph())
+            
+            self.graph_show_mag.trace_add("write", lambda *args: self.draw_graph())
+            self.graph_show_x.trace_add("write", lambda *args: self.draw_graph())
+            self.graph_show_y.trace_add("write", lambda *args: self.draw_graph())
+            self.graph_show_z.trace_add("write", lambda *args: self.draw_graph())
         except AttributeError:
             self.show_magnitude.trace("w", lambda *args: self.refresh_layout())
             self.show_vectors.trace("w", lambda *args: self.refresh_layout())
             self.show_graph.trace("w", lambda *args: self.refresh_layout())
+            # For older python versions, skipping detailed traces or using simpler approach if needed
+            self.font_size_mag.trace("w", update_fonts)
+            self.font_size_vec.trace("w", update_fonts)
 
         # --- Data ---
         self.history = deque()
@@ -203,6 +236,8 @@ class VelocityOverlay:
         self.menu.add_checkbutton(label="Show Vectors", variable=self.show_vectors)
         self.menu.add_checkbutton(label="Show Graph", variable=self.show_graph)
         self.menu.add_separator()
+        self.menu.add_command(label="Settings...", command=self.open_settings)
+        self.menu.add_separator()
         self.menu.add_command(label="Exit", command=sys.exit)
 
         self.root.bind("<ButtonPress-1>", self.start_move)
@@ -218,6 +253,50 @@ class VelocityOverlay:
 
     def show_context_menu(self, event):
         self.menu.post(event.x_root, event.y_root)
+        
+    def open_settings(self):
+        settings_win = tk.Toplevel(self.root)
+        settings_win.title("Settings")
+        settings_win.geometry("300x450")
+        settings_win.configure(bg="#222222")
+        settings_win.attributes('-topmost', True)
+        
+        style = ttk.Style()
+        style.theme_use('clam')
+        
+        def create_scale(parent, label, var, from_, to_):
+            frame = tk.Frame(parent, bg="#222222")
+            frame.pack(fill="x", padx=10, pady=5)
+            tk.Label(frame, text=label, fg="white", bg="#222222").pack(anchor="w")
+            scale = tk.Scale(frame, from_=from_, to=to_, orient="horizontal", variable=var, 
+                             bg="#222222", fg="white", highlightthickness=0)
+            scale.pack(fill="x")
+            
+        def create_check(parent, label, var):
+            cb = tk.Checkbutton(parent, text=label, variable=var, bg="#222222", fg="white", 
+                                selectcolor="#444444", activebackground="#222222", activeforeground="white")
+            cb.pack(anchor="w", padx=10)
+
+        # Font Settings
+        lbl_fonts = tk.Label(settings_win, text="Font Sizes", fg="#AAAAAA", bg="#222222", font=("Arial", 10, "bold"))
+        lbl_fonts.pack(anchor="w", padx=5, pady=(10, 0))
+        create_scale(settings_win, "Magnitude Font", self.font_size_mag, 10, 72)
+        create_scale(settings_win, "Vectors Font", self.font_size_vec, 8, 32)
+        create_scale(settings_win, "Graph Peak Font", self.font_size_peak, 6, 20)
+        
+        # Update Rate
+        lbl_rate = tk.Label(settings_win, text="Update Rate", fg="#AAAAAA", bg="#222222", font=("Arial", 10, "bold"))
+        lbl_rate.pack(anchor="w", padx=5, pady=(10, 0))
+        create_scale(settings_win, "Top Speed Update (sec)", self.peak_update_rate, 0.1, 10.0)
+        
+        # Graph Visibility
+        lbl_graph = tk.Label(settings_win, text="Graph Lines", fg="#AAAAAA", bg="#222222", font=("Arial", 10, "bold"))
+        lbl_graph.pack(anchor="w", padx=5, pady=(10, 0))
+        create_check(settings_win, "Show Magnitude (Green)", self.graph_show_mag)
+        create_check(settings_win, "Show X (Red)", self.graph_show_x)
+        create_check(settings_win, "Show Y (Light Green)", self.graph_show_y)
+        create_check(settings_win, "Show Z (Blue)", self.graph_show_z)
+
 
     def refresh_layout(self):
         self.label_speed.pack_forget()
@@ -264,88 +343,123 @@ class VelocityOverlay:
         now = data[-1][0]
         start_time = now - self.history_duration
         
-        # 1. Find max speed for scaling
-        max_val = 0.0
-        for t, s in data:
-            if s > max_val: max_val = s
+        # Determine which graphs to draw
+        draw_mag = self.graph_show_mag.get()
+        draw_x = self.graph_show_x.get()
+        draw_y = self.graph_show_y.get()
+        draw_z = self.graph_show_z.get()
         
-        scale_max = max_val
-        if scale_max < 10.0: scale_max = 10.0
+        # Collect values to determine scale
+        all_values = []
+        if draw_mag: all_values.extend([d[1] for d in data])
+        if draw_x: all_values.extend([d[2] for d in data])
+        if draw_y: all_values.extend([d[3] for d in data])
+        if draw_z: all_values.extend([d[4] for d in data])
+        
+        if not all_values: return # Nothing to draw
+
+        max_val = max(all_values)
+        min_val = min(all_values)
+        
+        # Adjust scale to always include 0
+        if min_val > 0: min_val = 0
+        if max_val < 0: max_val = 0
+        
+        val_range = max_val - min_val
+        if val_range < 10.0: val_range = 10.0 # Minimum range
         
         # 2. Draw Grid
+        # Zero line
+        zero_y = graph_height - ((0 - min_val) / val_range * graph_height)
+        self.canvas.create_line(0, zero_y, width, zero_y, fill="#555555")
+        
+        # Grid lines
         grid_interval = 10.0
-        current_grid = grid_interval
-        while current_grid < scale_max:
-            y = graph_height - (current_grid / scale_max * graph_height)
-            if y >= 0:
+        # Positive grid
+        curr = 0
+        while curr < max_val:
+            y = graph_height - ((curr - min_val) / val_range * graph_height)
+            if y >= 0 and y <= graph_height:
                 self.canvas.create_line(0, y, width, y, fill="#333333", dash=(4, 4))
-                self.canvas.create_text(width - 2, y, anchor="e", text=f"{int(current_grid)}", fill="#555555", font=("Arial", 8))
-            current_grid += grid_interval
+            curr += grid_interval
             
-        # Draw baseline
-        self.canvas.create_line(0, graph_height, width, graph_height, fill="#555555")
+        # Negative grid
+        curr = -10.0
+        while curr > min_val:
+            y = graph_height - ((curr - min_val) / val_range * graph_height)
+            if y >= 0 and y <= graph_height:
+                self.canvas.create_line(0, y, width, y, fill="#333333", dash=(4, 4))
+            curr -= grid_interval
+            
+        self.canvas.create_text(2, 2, anchor="nw", text=f"{max_val:.1f}", fill="#555555", font=("Arial", 8))
+        self.canvas.create_text(2, graph_height - 10, anchor="sw", text=f"{min_val:.1f}", fill="#555555", font=("Arial", 8))
 
-        # 3. Draw Graph Line
-        points = []
-        for t, s in data:
-            if t < start_time: continue
-            x = (t - start_time) / self.history_duration * width
-            y = graph_height - (s / scale_max * graph_height)
-            points.append(x)
-            points.append(y)
-            
-        if len(points) >= 4:
-            self.canvas.create_line(points, fill="#00FF00", width=2)
-            
-        self.canvas.create_text(2, 2, anchor="nw", text=f"{scale_max:.1f}", fill="#555555", font=("Arial", 8))
+        # Helper to draw line
+        def plot_line(index, color):
+            points = []
+            for item in data:
+                t = item[0]
+                val = item[index]
+                if t < start_time: continue
+                x = (t - start_time) / self.history_duration * width
+                y = graph_height - ((val - min_val) / val_range * graph_height)
+                points.append(x)
+                points.append(y)
+            if len(points) >= 4:
+                self.canvas.create_line(points, fill=color, width=2)
 
-        # 4. Find Peaks (Local Maxima)
-        peaks = []
-        for i in range(1, len(data) - 1):
-            t, s = data[i]
-            prev_s = data[i-1][1]
-            next_s = data[i+1][1]
-            
-            if s > prev_s and s > next_s and s > 1.0: # Threshold 1.0 m/s
-                peaks.append((t, s))
+        if draw_x: plot_line(2, "#FF5555")
+        if draw_y: plot_line(3, "#55FF55")
+        if draw_z: plot_line(4, "#5555FF")
+        if draw_mag: plot_line(1, "#00FF00")
+
+        # 4. Find Peaks (Local Maxima) for Magnitude only if enabled, or just update peaks based on magnitude?
+        # User asked for "font size of the top speed in the graph", usually implying Magnitude.
+        # But if Mag is off, maybe show peaks for highest visible?
+        # Let's stick to Magnitude for peaks as that's "Top Speed".
         
-        # 5. Filter Peaks
-        # Sort by speed descending to prioritize highest peaks
-        peaks.sort(key=lambda x: x[1], reverse=True)
-        
-        selected_peaks = []
-        for p in peaks:
-            t, s = p
-            # Check time distance from already selected peaks
-            conflict = False
-            for sp in selected_peaks:
-                if abs(t - sp[0]) < 2.0: # 2 seconds window
-                    conflict = True
-                    break
-            if not conflict:
-                selected_peaks.append(p)
-        
-        # 6. Draw Selected Peaks
-        for t, s in selected_peaks:
-            if t < start_time: continue
+        if draw_mag:
+            peaks = []
+            for i in range(1, len(data) - 1):
+                t = data[i][0]
+                s = data[i][1] # Magnitude
+                prev_s = data[i-1][1]
+                next_s = data[i+1][1]
+                
+                if s > prev_s and s > next_s and s > 1.0: 
+                    peaks.append((t, s))
             
-            px = (t - start_time) / self.history_duration * width
-            py = graph_height - (s / scale_max * graph_height)
+            peaks.sort(key=lambda x: x[1], reverse=True)
             
-            # Vertical line (from peak to bottom axis)
-            self.canvas.create_line(px, py, px, graph_height, fill="#FFFF00", dash=(2, 4))
+            selected_peaks = []
+            update_rate = self.peak_update_rate.get()
             
-            # Text label below the axis
-            label_y = graph_height + 10 # Centered in the 20px margin
-            anchor = "center" 
+            for p in peaks:
+                t, s = p
+                conflict = False
+                for sp in selected_peaks:
+                    if abs(t - sp[0]) < update_rate: 
+                        conflict = True
+                        break
+                if not conflict:
+                    selected_peaks.append(p)
             
-            # Boundary checks for X only
-            if px < 20:
-                anchor = "w"
-            elif px > width - 20:
-                anchor = "e"
+            peak_font = ("Arial", self.font_size_peak.get(), "bold")
             
-            self.canvas.create_text(px, label_y, text=f"{s:.1f}", fill="#FFFF00", font=("Arial", 8, "bold"), anchor=anchor)
+            for t, s in selected_peaks:
+                if t < start_time: continue
+                
+                px = (t - start_time) / self.history_duration * width
+                py = graph_height - ((s - min_val) / val_range * graph_height)
+                
+                self.canvas.create_line(px, py, px, graph_height, fill="#FFFF00", dash=(2, 4))
+                
+                label_y = graph_height + 10 
+                anchor = "center" 
+                if px < 20: anchor = "w"
+                elif px > width - 20: anchor = "e"
+                
+                self.canvas.create_text(px, label_y, text=f"{s:.1f}", fill="#FFFF00", font=peak_font, anchor=anchor)
 
     def update(self):
         try:
@@ -381,7 +495,8 @@ class VelocityOverlay:
                         self.label_vx.config(text=f"X: {vx:.2f}")
                         self.label_vy.config(text=f"Y: {vy:.2f}")
                         self.label_vz.config(text=f"Z: {vz:.2f}")
-                        self.history.append((current_time, speed))
+                        # Store all components: time, speed, vx, vy, vz
+                        self.history.append((current_time, speed, vx, vy, vz))
                     else:
                         self.label_speed.config(text="GARBAGE")
                         self.label_vx.config(text="X: --")
