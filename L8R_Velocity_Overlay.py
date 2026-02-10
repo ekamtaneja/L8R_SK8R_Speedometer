@@ -6,6 +6,8 @@ import sys
 import math
 import time
 import struct
+import threading
+import queue
 from collections import deque
 
 # ==============================================================================
@@ -181,6 +183,7 @@ class VelocityOverlay:
         
         self.peak_update_rate = tk.DoubleVar(value=2.0)
         self.polling_rate = tk.IntVar(value=50) # Polling rate in ms
+        self.peak_display_delay = tk.IntVar(value=0) # Delay in ms
         
         self.precision_mag = tk.IntVar(value=2)
         self.precision_vec = tk.IntVar(value=2)
@@ -255,11 +258,24 @@ class VelocityOverlay:
         self.root.bind("<Button-3>", self.show_context_menu)
         self.root.bind("<Double-Button-1>", lambda e: sys.exit())
 
+        # Threading setup
+        self.data_queue = queue.Queue()
+        self.status_msg = "Initializing..."
+        self.running = True
+        self.thread_poll_rate = self.polling_rate.get()
+        
+        # Update thread rate when UI changes
+        self.polling_rate.trace_add("write", lambda *args: setattr(self, 'thread_poll_rate', self.polling_rate.get()))
+
         self.mem = MemoryReader()
         self.attached = False
         self.player_address = 0
         
-        self.update()
+        # Start polling thread
+        self.poll_thread = threading.Thread(target=self.polling_loop, daemon=True)
+        self.poll_thread.start()
+        
+        self.update_ui()
 
     def show_context_menu(self, event):
         self.menu.post(event.x_root, event.y_root)
@@ -318,7 +334,8 @@ class VelocityOverlay:
         lbl_rate = tk.Label(scrollable_frame, text="Update Rates", fg="#AAAAAA", bg="#222222", font=("Arial", 10, "bold"))
         lbl_rate.pack(anchor="w", padx=5, pady=(10, 0))
         create_scale("Top Speed Update (sec)", self.peak_update_rate, 0.1, 10.0)
-        create_scale("Poll Rate (ms)", self.polling_rate, 10, 500)
+        create_scale("Poll Rate (ms)", self.polling_rate, 1, 500)
+        create_scale("Peak Delay (ms)", self.peak_display_delay, 0, 2000)
         
         # Precision Settings
         lbl_prec = tk.Label(scrollable_frame, text="Decimal Precision", fg="#AAAAAA", bg="#222222", font=("Arial", 10, "bold"))
@@ -487,9 +504,17 @@ class VelocityOverlay:
         
         selected_peaks = []
         update_rate = self.peak_update_rate.get()
+        delay_ms = self.peak_display_delay.get()
+        delay_s = delay_ms / 1000.0
+        
+        current_time = now if now else time.time()
         
         for p in peaks:
             t, s = p
+            # Skip if peak is too recent (delay)
+            if (current_time - t) < delay_s:
+                continue
+            
             conflict = False
             for sp in selected_peaks:
                 if abs(t - sp[0]) < update_rate: 
@@ -498,12 +523,17 @@ class VelocityOverlay:
             if not conflict:
                 selected_peaks.append(p)
         
+        # Sort by TIME ascending to stabilize row assignment
+        selected_peaks.sort(key=lambda x: x[0])
+        
         peak_font = ("Arial", self.font_size_peak.get(), "bold")
         peak_decimals = self.precision_peak.get()
         
-        for i, p in enumerate(selected_peaks):
+        # Only show peaks visible in window
+        visible_peaks = [p for p in selected_peaks if p[0] >= start_time]
+        
+        for i, p in enumerate(visible_peaks):
             t, s = p
-            if t < start_time: continue
             
             px = (t - start_time) / self.history_duration * width
             py = graph_height - ((s - min_val) / val_range * graph_height)
@@ -511,6 +541,7 @@ class VelocityOverlay:
             canvas.create_line(px, py, px, graph_height, fill="#FFFF00", dash=(2, 4))
             
             # Stagger labels across 3 rows to prevent overlap
+            # Use stable index based on time-sorted list
             row = i % 3
             label_y = graph_height + 10 + (row * 10)
             
@@ -534,63 +565,84 @@ class VelocityOverlay:
         if self.graph_show_z.get():
             self.draw_single_graph(self.canvas_z, 4, "#5555FF", "Z VELOCITY")
 
-    def update(self):
-        try:
-            current_time = time.time()
-            
-            if not self.attached:
-                if self.mem.attach(PROCESS_NAME):
-                    self.attached = True
-                    self.label_status.config(text="Attached. resolving pointer...")
-                else:
-                    self.label_status.config(text="Game not found...")
-            
-            if self.attached:
-                mod_base = self.mem.get_module(BASE_MODULE)
-                if mod_base:
-                    self.player_address = self.mem.resolve_chain(mod_base + BASE_OFFSET, POINTER_OFFSETS)
+    def polling_loop(self):
+        while self.running:
+            try:
+                # Sleep based on rate
+                rate_sec = self.thread_poll_rate / 1000.0
+                if rate_sec < 0.001: rate_sec = 0.001
+                time.sleep(rate_sec)
+                
+                current_time = time.time()
+                
+                if not self.attached:
+                    if self.mem.attach(PROCESS_NAME):
+                        self.attached = True
+                        self.status_msg = "Attached. resolving pointer..."
+                    else:
+                        self.status_msg = "Game not found..."
+                
+                if self.attached:
+                    mod_base = self.mem.get_module(BASE_MODULE)
+                    if mod_base:
+                        self.player_address = self.mem.resolve_chain(mod_base + BASE_OFFSET, POINTER_OFFSETS)
+                        if self.player_address:
+                            self.status_msg = f"Linked: {hex(self.player_address).upper()}"
+                        else:
+                            self.status_msg = "Resolving chain..."
+                    else:
+                        self.status_msg = f"Waiting for {BASE_MODULE}..."
+
                     if self.player_address:
-                        self.label_status.config(text=f"Linked: {hex(self.player_address).upper()}")
-                    else:
-                        self.label_status.config(text="Resolving chain...")
-                else:
-                    self.label_status.config(text=f"Waiting for {BASE_MODULE}...")
-
-                if self.player_address:
-                    vx = self.mem.read_float(self.player_address + OFFSET_VELOCITY)
-                    vy = self.mem.read_float(self.player_address + OFFSET_GRAVITY) 
-                    vz = self.mem.read_float(self.player_address + OFFSET_VELOCITY + 8)
-                    
-                    speed = math.sqrt(vx*vx + vy*vy + vz*vz)
-                    
-                    if speed < 100000:
-                        prec_mag = self.precision_mag.get()
-                        prec_vec = self.precision_vec.get()
+                        vx = self.mem.read_float(self.player_address + OFFSET_VELOCITY)
+                        vy = self.mem.read_float(self.player_address + OFFSET_GRAVITY) 
+                        vz = self.mem.read_float(self.player_address + OFFSET_VELOCITY + 8)
                         
-                        self.label_speed.config(text=f"{speed:.{prec_mag}f} m/s")
-                        self.label_vx.config(text=f"X: {vx:.{prec_vec}f}")
-                        self.label_vy.config(text=f"Y: {vy:.{prec_vec}f}")
-                        self.label_vz.config(text=f"Z: {vz:.{prec_vec}f}")
-                        # Store all components: time, speed, vx, vy, vz
-                        self.history.append((current_time, speed, vx, vy, vz))
-                    else:
-                        self.label_speed.config(text="GARBAGE")
-                        self.label_vx.config(text="X: --")
-                        self.label_vy.config(text="Y: --")
-                        self.label_vz.config(text="Z: --")
-                        self.player_address = 0
-        except Exception as e:
-            self.attached = False
-            self.label_status.config(text="Error reading memory")
+                        speed = math.sqrt(vx*vx + vy*vy + vz*vz)
+                        
+                        if speed < 100000:
+                            self.data_queue.put((current_time, speed, vx, vy, vz))
+                        else:
+                            self.player_address = 0
+            except Exception as e:
+                self.attached = False
+                self.status_msg = "Error reading memory"
+                time.sleep(1)
 
+    def update_ui(self):
+        # Consume queue
+        while not self.data_queue.empty():
+            try:
+                item = self.data_queue.get_nowait()
+                self.history.append(item)
+                
+                if self.data_queue.empty():
+                    current_time, speed, vx, vy, vz = item
+                    
+                    prec_mag = self.precision_mag.get()
+                    prec_vec = self.precision_vec.get()
+                    
+                    self.label_speed.config(text=f"{speed:.{prec_mag}f} m/s")
+                    self.label_vx.config(text=f"X: {vx:.{prec_vec}f}")
+                    self.label_vy.config(text=f"Y: {vy:.{prec_vec}f}")
+                    self.label_vz.config(text=f"Z: {vz:.{prec_vec}f}")
+            except queue.Empty:
+                break
+        
+        self.label_status.config(text=self.status_msg)
+        
+        if "Linked" not in self.status_msg:
+             self.label_speed.config(text="--")
+             self.label_vx.config(text="X: --")
+             self.label_vy.config(text="Y: --")
+             self.label_vz.config(text="Z: --")
+        
+        current_time = time.time()
         while self.history and (current_time - self.history[0][0] > self.history_duration):
             self.history.popleft()
             
         self.draw_graph()
-        # Use the configured polling rate
-        rate = self.polling_rate.get()
-        if rate < 10: rate = 10 # Safety limit
-        self.root.after(rate, self.update)
+        self.root.after(33, self.update_ui)
 
 if __name__ == "__main__":
     try:
