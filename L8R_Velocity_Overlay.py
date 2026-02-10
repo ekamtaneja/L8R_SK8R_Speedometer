@@ -202,9 +202,14 @@ class VelocityOverlay:
         self.show_graph = tk.BooleanVar(value=True)
         
         # Call refresh_layout when variables change
-        self.show_magnitude.trace_add("write", lambda *args: self.refresh_layout())
-        self.show_vectors.trace_add("write", lambda *args: self.refresh_layout())
-        self.show_graph.trace_add("write", lambda *args: self.refresh_layout())
+        try:
+            self.show_magnitude.trace_add("write", lambda *args: self.refresh_layout())
+            self.show_vectors.trace_add("write", lambda *args: self.refresh_layout())
+            self.show_graph.trace_add("write", lambda *args: self.refresh_layout())
+        except AttributeError:
+            self.show_magnitude.trace("w", lambda *args: self.refresh_layout())
+            self.show_vectors.trace("w", lambda *args: self.refresh_layout())
+            self.show_graph.trace("w", lambda *args: self.refresh_layout())
 
         # --- Data ---
         self.history = deque()
@@ -306,6 +311,16 @@ class VelocityOverlay:
         
         if max_speed < 10.0: max_speed = 10.0 # Min vertical scale
         
+        # Draw grid lines at 10m/s intervals
+        grid_interval = 10.0
+        current_grid = grid_interval
+        while current_grid < max_speed:
+            y = height - (current_grid / max_speed * height)
+            if y >= 0:
+                self.canvas.create_line(0, y, width, y, fill="#333333", dash=(4, 4))
+                self.canvas.create_text(width - 2, y, anchor="e", text=f"{int(current_grid)}", fill="#555555", font=("Arial", 8))
+            current_grid += grid_interval
+
         # Draw lines
         points = []
         for t, s in self.history:
@@ -392,6 +407,12 @@ class VelocityOverlay:
         self.root.after(50, self.update)
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = VelocityOverlay(root)
-    root.mainloop()
+    try:
+        root = tk.Tk()
+        app = VelocityOverlay(root)
+        root.mainloop()
+    except Exception as e:
+        import traceback
+        with open("crash_log.txt", "w") as f:
+            traceback.print_exc(file=f)
+            f.write(f"\nError: {e}")
