@@ -8,6 +8,7 @@ import time
 import struct
 import threading
 import queue
+import re
 from collections import deque
 
 # ==============================================================================
@@ -17,9 +18,19 @@ from collections import deque
 # --- Configuration ------------------------------------------------------------
 
 PROCESS_NAME = "l8rsk8r.exe"
-BASE_MODULE = "mono-2.0-bdwgc.dll" 
-BASE_OFFSET = 0x00A044C0  
-POINTER_OFFSETS = [0x7DC, 0x48, 0x288, 0x0] 
+BASE_MODULE = "UnityPlayer.dll" 
+
+# Fallback Static Pointer (May not work on all PCs)
+BASE_OFFSET = 0x01C67AE8
+POINTER_OFFSETS = [0x100, 0xD0, 0x8, 0x48, 0x288, 0x0] 
+
+# AOB Signature Scanning (Preferred)
+# Set VELOCITY_SIGNATURE to a unique byte pattern found in Cheat Engine.
+# Example: "48 8B 05 ?? ?? ?? ?? 48 8B 88"
+# Use '??' for wildcards.
+VELOCITY_SIGNATURE = None 
+VELOCITY_SIG_OFFSET = 0x0 # Offset from the signature match to the pointer
+
 OFFSET_VELOCITY = 0x24C
 OFFSET_GRAVITY = 0x27C
 
@@ -86,11 +97,12 @@ def get_pid_by_name(process_name):
 def get_module_base(pid, module_name):
     try:
         snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid)
-        if snapshot == -1 or snapshot == 0: return None
+        if snapshot == -1 or snapshot == 0: return None, 0
     except:
-        return None
+        return None, 0
 
     base_addr = None
+    base_size = 0
     entry = MODULEENTRY32()
     entry.dwSize = ctypes.sizeof(MODULEENTRY32)
     
@@ -100,13 +112,14 @@ def get_module_base(pid, module_name):
                 m_name = entry.szModule.decode('utf-8').lower()
                 if module_name.lower() == m_name:
                     base_addr = entry.modBaseAddr
+                    base_size = entry.modBaseSize
                     break
             except:
                 pass
             if not kernel32.Module32Next(snapshot, ctypes.byref(entry)):
                 break
     kernel32.CloseHandle(snapshot)
-    return base_addr
+    return base_addr, base_size
 
 class MemoryReader:
     def __init__(self):
@@ -123,8 +136,8 @@ class MemoryReader:
         return False
 
     def get_module(self, module_name):
-        if not self.pid: return 0
-        return get_module_base(self.pid, module_name) or 0
+        if not self.pid: return 0, 0
+        return get_module_base(self.pid, module_name)
 
     def read_bytes(self, address, size):
         if not self.handle or not address: return None
@@ -145,6 +158,34 @@ class MemoryReader:
         if data:
             return struct.unpack('<f', data)[0]
         return 0.0
+
+    def scan_pattern(self, module_name, pattern_str):
+        if not self.pid: return None
+        base, size = self.get_module(module_name)
+        if not base or not size: return None
+        
+        try:
+            # Read entire module
+            data = self.read_bytes(base, size)
+            if not data: return None
+            
+            # Convert pattern "48 8B ??" -> regex
+            parts = pattern_str.split()
+            regex_parts = []
+            for part in parts:
+                if part == '??' or part == '?':
+                    regex_parts.append(b'.')
+                else:
+                    regex_parts.append(re.escape(bytes.fromhex(part)))
+            regex = b''.join(regex_parts)
+            
+            match = re.search(regex, data)
+            if match:
+                return base + match.start()
+        except Exception as e:
+            # print(f"Scan error: {e}")
+            pass
+        return None
 
     def resolve_chain(self, base_addr, offsets):
         current_addr = self.read_ptr(base_addr)
@@ -583,13 +624,31 @@ class VelocityOverlay:
                         self.status_msg = "Game not found..."
                 
                 if self.attached:
-                    mod_base = self.mem.get_module(BASE_MODULE)
+                    mod_base, mod_size = self.mem.get_module(BASE_MODULE)
                     if mod_base:
-                        self.player_address = self.mem.resolve_chain(mod_base + BASE_OFFSET, POINTER_OFFSETS)
-                        if self.player_address:
-                            self.status_msg = f"Linked: {hex(self.player_address).upper()}"
+                        if VELOCITY_SIGNATURE:
+                            # Try Signature Scan
+                            scan_res = self.mem.scan_pattern(BASE_MODULE, VELOCITY_SIGNATURE)
+                            if scan_res:
+                                self.player_address = self.mem.resolve_chain(scan_res + VELOCITY_SIG_OFFSET, POINTER_OFFSETS)
+                                if self.player_address:
+                                    self.status_msg = f"Linked (AOB): {hex(self.player_address).upper()}"
+                                else:
+                                    self.status_msg = "AOB Found, resolving chain..."
+                            else:
+                                # Fallback to static
+                                self.player_address = self.mem.resolve_chain(mod_base + BASE_OFFSET, POINTER_OFFSETS)
+                                if self.player_address:
+                                    self.status_msg = f"Linked (Static): {hex(self.player_address).upper()}"
+                                else:
+                                    self.status_msg = "Scanning AOB..."
                         else:
-                            self.status_msg = "Resolving chain..."
+                            # Use Static Pointer
+                            self.player_address = self.mem.resolve_chain(mod_base + BASE_OFFSET, POINTER_OFFSETS)
+                            if self.player_address:
+                                self.status_msg = f"Linked: {hex(self.player_address).upper()}"
+                            else:
+                                self.status_msg = "Resolving chain..."
                     else:
                         self.status_msg = f"Waiting for {BASE_MODULE}..."
 
