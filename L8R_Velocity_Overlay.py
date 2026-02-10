@@ -193,7 +193,7 @@ class VelocityOverlay:
         self.label_vz = tk.Label(self.frame_vec, text="Z: 0.00", font=("Consolas", 10), fg="#5555FF", bg="black")
         self.label_vz.pack(side="left", expand=True)
         
-        self.canvas = tk.Canvas(root, bg="black", height=60, highlightthickness=0)
+        self.canvas = tk.Canvas(root, bg="black", height=100, highlightthickness=0)
         self.label_status = tk.Label(root, text="Searching for game...", font=("Arial", 8), fg="white", bg="black")
 
         self.refresh_layout()
@@ -255,37 +255,97 @@ class VelocityOverlay:
         width = self.canvas.winfo_width()
         height = self.canvas.winfo_height()
         if width <= 1: width = 240
+        
+        margin_bottom = 20
+        graph_height = height - margin_bottom
 
-        now = self.history[-1][0]
+        # Create local copy for analysis
+        data = list(self.history)
+        now = data[-1][0]
         start_time = now - self.history_duration
         
-        max_speed = 0.0
-        for t, s in self.history:
-            if s > max_speed: max_speed = s
+        # 1. Find max speed for scaling
+        max_val = 0.0
+        for t, s in data:
+            if s > max_val: max_val = s
         
-        if max_speed < 10.0: max_speed = 10.0
+        scale_max = max_val
+        if scale_max < 10.0: scale_max = 10.0
         
+        # 2. Draw Grid
         grid_interval = 10.0
         current_grid = grid_interval
-        while current_grid < max_speed:
-            y = height - (current_grid / max_speed * height)
+        while current_grid < scale_max:
+            y = graph_height - (current_grid / scale_max * graph_height)
             if y >= 0:
                 self.canvas.create_line(0, y, width, y, fill="#333333", dash=(4, 4))
                 self.canvas.create_text(width - 2, y, anchor="e", text=f"{int(current_grid)}", fill="#555555", font=("Arial", 8))
             current_grid += grid_interval
+            
+        # Draw baseline
+        self.canvas.create_line(0, graph_height, width, graph_height, fill="#555555")
 
+        # 3. Draw Graph Line
         points = []
-        for t, s in self.history:
+        for t, s in data:
             if t < start_time: continue
             x = (t - start_time) / self.history_duration * width
-            y = height - (s / max_speed * height)
+            y = graph_height - (s / scale_max * graph_height)
             points.append(x)
             points.append(y)
             
         if len(points) >= 4:
             self.canvas.create_line(points, fill="#00FF00", width=2)
             
-        self.canvas.create_text(2, 2, anchor="nw", text=f"{max_speed:.1f}", fill="#555555", font=("Arial", 8))
+        self.canvas.create_text(2, 2, anchor="nw", text=f"{scale_max:.1f}", fill="#555555", font=("Arial", 8))
+
+        # 4. Find Peaks (Local Maxima)
+        peaks = []
+        for i in range(1, len(data) - 1):
+            t, s = data[i]
+            prev_s = data[i-1][1]
+            next_s = data[i+1][1]
+            
+            if s > prev_s and s > next_s and s > 1.0: # Threshold 1.0 m/s
+                peaks.append((t, s))
+        
+        # 5. Filter Peaks
+        # Sort by speed descending to prioritize highest peaks
+        peaks.sort(key=lambda x: x[1], reverse=True)
+        
+        selected_peaks = []
+        for p in peaks:
+            t, s = p
+            # Check time distance from already selected peaks
+            conflict = False
+            for sp in selected_peaks:
+                if abs(t - sp[0]) < 2.0: # 2 seconds window
+                    conflict = True
+                    break
+            if not conflict:
+                selected_peaks.append(p)
+        
+        # 6. Draw Selected Peaks
+        for t, s in selected_peaks:
+            if t < start_time: continue
+            
+            px = (t - start_time) / self.history_duration * width
+            py = graph_height - (s / scale_max * graph_height)
+            
+            # Vertical line (from peak to bottom axis)
+            self.canvas.create_line(px, py, px, graph_height, fill="#FFFF00", dash=(2, 4))
+            
+            # Text label below the axis
+            label_y = graph_height + 10 # Centered in the 20px margin
+            anchor = "center" 
+            
+            # Boundary checks for X only
+            if px < 20:
+                anchor = "w"
+            elif px > width - 20:
+                anchor = "e"
+            
+            self.canvas.create_text(px, label_y, text=f"{s:.1f}", fill="#FFFF00", font=("Arial", 8, "bold"), anchor=anchor)
 
     def update(self):
         try:
