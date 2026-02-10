@@ -2,6 +2,8 @@
 
 A lightweight velocity tracker overlay for L8R SK8R.
 
+[Watch the Demo Video](demo.mp4)
+
 ## Features
 - Real-time velocity tracking (Magnitude, X, Y, Z)
 - Visual speed history graph
