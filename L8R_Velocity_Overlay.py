@@ -161,13 +161,14 @@ class VelocityOverlay:
         self.root.attributes('-topmost', True)
         self.root.attributes('-alpha', 0.8)
         self.root.overrideredirect(True)
-        self.root.geometry("250x200+50+50")
+        # Position only, let size be dynamic
+        self.root.geometry("+50+50")
         self.root.configure(bg='black')
 
         # --- Settings ---
         self.show_magnitude = tk.BooleanVar(value=True)
         self.show_vectors = tk.BooleanVar(value=True)
-        self.show_graph = tk.BooleanVar(value=True)
+        self.show_graph = tk.BooleanVar(value=True) # Overall graph toggle
 
         self.graph_show_mag = tk.BooleanVar(value=True)
         self.graph_show_x = tk.BooleanVar(value=False)
@@ -179,6 +180,13 @@ class VelocityOverlay:
         self.font_size_peak = tk.IntVar(value=8)
         
         self.peak_update_rate = tk.DoubleVar(value=2.0)
+        self.polling_rate = tk.IntVar(value=50) # Polling rate in ms
+        
+        self.precision_mag = tk.IntVar(value=2)
+        self.precision_vec = tk.IntVar(value=2)
+        self.precision_peak = tk.IntVar(value=1)
+        
+        self.graph_height = tk.IntVar(value=100) # Dynamic graph height
 
         # Apply font updates
         def update_fonts(*args):
@@ -198,18 +206,15 @@ class VelocityOverlay:
             self.font_size_vec.trace_add("write", update_fonts)
             self.font_size_peak.trace_add("write", lambda *args: self.draw_graph())
             self.peak_update_rate.trace_add("write", lambda *args: self.draw_graph())
+            self.graph_height.trace_add("write", lambda *args: self.refresh_layout()) # Update layout if height changes
             
-            self.graph_show_mag.trace_add("write", lambda *args: self.draw_graph())
-            self.graph_show_x.trace_add("write", lambda *args: self.draw_graph())
-            self.graph_show_y.trace_add("write", lambda *args: self.draw_graph())
-            self.graph_show_z.trace_add("write", lambda *args: self.draw_graph())
+            self.graph_show_mag.trace_add("write", lambda *args: self.refresh_layout())
+            self.graph_show_x.trace_add("write", lambda *args: self.refresh_layout())
+            self.graph_show_y.trace_add("write", lambda *args: self.refresh_layout())
+            self.graph_show_z.trace_add("write", lambda *args: self.refresh_layout())
         except AttributeError:
-            self.show_magnitude.trace("w", lambda *args: self.refresh_layout())
-            self.show_vectors.trace("w", lambda *args: self.refresh_layout())
-            self.show_graph.trace("w", lambda *args: self.refresh_layout())
-            # For older python versions, skipping detailed traces or using simpler approach if needed
-            self.font_size_mag.trace("w", update_fonts)
-            self.font_size_vec.trace("w", update_fonts)
+            # Fallback for older python
+            pass
 
         # --- Data ---
         self.history = deque()
@@ -226,7 +231,12 @@ class VelocityOverlay:
         self.label_vz = tk.Label(self.frame_vec, text="Z: 0.00", font=("Consolas", 10), fg="#5555FF", bg="black")
         self.label_vz.pack(side="left", expand=True)
         
-        self.canvas = tk.Canvas(root, bg="black", height=100, highlightthickness=0)
+        # Multiple Canvases
+        self.canvas_mag = tk.Canvas(root, bg="black", height=100, highlightthickness=0)
+        self.canvas_x = tk.Canvas(root, bg="black", height=100, highlightthickness=0)
+        self.canvas_y = tk.Canvas(root, bg="black", height=100, highlightthickness=0)
+        self.canvas_z = tk.Canvas(root, bg="black", height=100, highlightthickness=0)
+        
         self.label_status = tk.Label(root, text="Searching for game...", font=("Arial", 8), fg="white", bg="black")
 
         self.refresh_layout()
@@ -257,52 +267,96 @@ class VelocityOverlay:
     def open_settings(self):
         settings_win = tk.Toplevel(self.root)
         settings_win.title("Settings")
-        settings_win.geometry("300x450")
+        settings_win.geometry("320x450")
         settings_win.configure(bg="#222222")
         settings_win.attributes('-topmost', True)
         
         style = ttk.Style()
         style.theme_use('clam')
         
-        def create_scale(parent, label, var, from_, to_):
-            frame = tk.Frame(parent, bg="#222222")
+        # Create Scrollable Frame
+        main_frame = tk.Frame(settings_win, bg="#222222")
+        main_frame.pack(fill="both", expand=True)
+        
+        canvas = tk.Canvas(main_frame, bg="#222222", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas, bg="#222222")
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Helper functions use scrollable_frame as parent
+        def create_scale(label, var, from_, to_):
+            frame = tk.Frame(scrollable_frame, bg="#222222")
             frame.pack(fill="x", padx=10, pady=5)
             tk.Label(frame, text=label, fg="white", bg="#222222").pack(anchor="w")
             scale = tk.Scale(frame, from_=from_, to=to_, orient="horizontal", variable=var, 
                              bg="#222222", fg="white", highlightthickness=0)
             scale.pack(fill="x")
             
-        def create_check(parent, label, var):
-            cb = tk.Checkbutton(parent, text=label, variable=var, bg="#222222", fg="white", 
+        def create_check(label, var):
+            cb = tk.Checkbutton(scrollable_frame, text=label, variable=var, bg="#222222", fg="white", 
                                 selectcolor="#444444", activebackground="#222222", activeforeground="white")
             cb.pack(anchor="w", padx=10)
 
         # Font Settings
-        lbl_fonts = tk.Label(settings_win, text="Font Sizes", fg="#AAAAAA", bg="#222222", font=("Arial", 10, "bold"))
+        lbl_fonts = tk.Label(scrollable_frame, text="Font Sizes", fg="#AAAAAA", bg="#222222", font=("Arial", 10, "bold"))
         lbl_fonts.pack(anchor="w", padx=5, pady=(10, 0))
-        create_scale(settings_win, "Magnitude Font", self.font_size_mag, 10, 72)
-        create_scale(settings_win, "Vectors Font", self.font_size_vec, 8, 32)
-        create_scale(settings_win, "Graph Peak Font", self.font_size_peak, 6, 20)
+        create_scale("Magnitude Font", self.font_size_mag, 10, 72)
+        create_scale("Vectors Font", self.font_size_vec, 8, 32)
+        create_scale("Graph Peak Font", self.font_size_peak, 6, 20)
         
         # Update Rate
-        lbl_rate = tk.Label(settings_win, text="Update Rate", fg="#AAAAAA", bg="#222222", font=("Arial", 10, "bold"))
+        lbl_rate = tk.Label(scrollable_frame, text="Update Rates", fg="#AAAAAA", bg="#222222", font=("Arial", 10, "bold"))
         lbl_rate.pack(anchor="w", padx=5, pady=(10, 0))
-        create_scale(settings_win, "Top Speed Update (sec)", self.peak_update_rate, 0.1, 10.0)
+        create_scale("Top Speed Update (sec)", self.peak_update_rate, 0.1, 10.0)
+        create_scale("Poll Rate (ms)", self.polling_rate, 10, 500)
+        
+        # Precision Settings
+        lbl_prec = tk.Label(scrollable_frame, text="Decimal Precision", fg="#AAAAAA", bg="#222222", font=("Arial", 10, "bold"))
+        lbl_prec.pack(anchor="w", padx=5, pady=(10, 0))
+        create_scale("Magnitude Decimals", self.precision_mag, 0, 5)
+        create_scale("Vectors Decimals", self.precision_vec, 0, 5)
+        create_scale("Graph Peak Decimals", self.precision_peak, 0, 5)
         
         # Graph Visibility
-        lbl_graph = tk.Label(settings_win, text="Graph Lines", fg="#AAAAAA", bg="#222222", font=("Arial", 10, "bold"))
+        lbl_graph = tk.Label(scrollable_frame, text="Graphs", fg="#AAAAAA", bg="#222222", font=("Arial", 10, "bold"))
         lbl_graph.pack(anchor="w", padx=5, pady=(10, 0))
-        create_check(settings_win, "Show Magnitude (Green)", self.graph_show_mag)
-        create_check(settings_win, "Show X (Red)", self.graph_show_x)
-        create_check(settings_win, "Show Y (Light Green)", self.graph_show_y)
-        create_check(settings_win, "Show Z (Blue)", self.graph_show_z)
+        create_scale("Graph Height", self.graph_height, 50, 300)
+        create_check("Show Magnitude (Green)", self.graph_show_mag)
+        create_check("Show X (Red)", self.graph_show_x)
+        create_check("Show Y (Light Green)", self.graph_show_y)
+        create_check("Show Z (Blue)", self.graph_show_z)
+        
+        # Add some padding at the bottom
+        tk.Label(scrollable_frame, text="", bg="#222222").pack(pady=10)
+        
+        # Mousewheel scrolling
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        
+        canvas.bind_all("<MouseWheel>", on_mousewheel)
+        settings_win.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>"))
 
 
     def refresh_layout(self):
         self.label_speed.pack_forget()
         self.frame_vec.pack_forget()
-        self.canvas.pack_forget()
+        self.canvas_mag.pack_forget()
+        self.canvas_x.pack_forget()
+        self.canvas_y.pack_forget()
+        self.canvas_z.pack_forget()
         self.label_status.pack_forget()
+        
+        current_height = self.graph_height.get()
 
         if self.show_magnitude.get():
             self.label_speed.pack(pady=(10, 0))
@@ -311,7 +365,19 @@ class VelocityOverlay:
             self.frame_vec.pack(fill="x", pady=5)
             
         if self.show_graph.get():
-            self.canvas.pack(fill="x", pady=5, padx=5)
+            # Only pack individual graphs if enabled
+            if self.graph_show_mag.get():
+                self.canvas_mag.config(height=current_height)
+                self.canvas_mag.pack(fill="x", pady=2, padx=5)
+            if self.graph_show_x.get():
+                self.canvas_x.config(height=current_height)
+                self.canvas_x.pack(fill="x", pady=2, padx=5)
+            if self.graph_show_y.get():
+                self.canvas_y.config(height=current_height)
+                self.canvas_y.pack(fill="x", pady=2, padx=5)
+            if self.graph_show_z.get():
+                self.canvas_z.config(height=current_height)
+                self.canvas_z.pack(fill="x", pady=2, padx=5)
             
         self.label_status.pack(side="bottom")
 
@@ -323,19 +389,18 @@ class VelocityOverlay:
         x = self.root.winfo_x() + (event.x - self.root.x)
         y = self.root.winfo_y() + (event.y - self.root.y)
         self.root.geometry(f"+{x}+{y}")
-
-    def draw_graph(self):
-        if not self.show_graph.get(): return
         
-        self.canvas.delete("all")
+    def draw_single_graph(self, canvas, data_index, color, title):
+        canvas.delete("all")
         
         if len(self.history) < 2: return
 
-        width = self.canvas.winfo_width()
-        height = self.canvas.winfo_height()
+        width = canvas.winfo_width()
+        height = canvas.winfo_height()
         if width <= 1: width = 240
         
-        margin_bottom = 20
+        # Increased margin to accommodate 3 rows of labels
+        margin_bottom = 40 
         graph_height = height - margin_bottom
 
         # Create local copy for analysis
@@ -343,20 +408,10 @@ class VelocityOverlay:
         now = data[-1][0]
         start_time = now - self.history_duration
         
-        # Determine which graphs to draw
-        draw_mag = self.graph_show_mag.get()
-        draw_x = self.graph_show_x.get()
-        draw_y = self.graph_show_y.get()
-        draw_z = self.graph_show_z.get()
+        # Collect values
+        all_values = [d[data_index] for d in data]
         
-        # Collect values to determine scale
-        all_values = []
-        if draw_mag: all_values.extend([d[1] for d in data])
-        if draw_x: all_values.extend([d[2] for d in data])
-        if draw_y: all_values.extend([d[3] for d in data])
-        if draw_z: all_values.extend([d[4] for d in data])
-        
-        if not all_values: return # Nothing to draw
+        if not all_values: return
 
         max_val = max(all_values)
         min_val = min(all_values)
@@ -368,10 +423,13 @@ class VelocityOverlay:
         val_range = max_val - min_val
         if val_range < 10.0: val_range = 10.0 # Minimum range
         
+        # Draw Title
+        canvas.create_text(2, 2, anchor="nw", text=title, fill=color, font=("Arial", 8, "bold"))
+        
         # 2. Draw Grid
         # Zero line
         zero_y = graph_height - ((0 - min_val) / val_range * graph_height)
-        self.canvas.create_line(0, zero_y, width, zero_y, fill="#555555")
+        canvas.create_line(0, zero_y, width, zero_y, fill="#555555")
         
         # Grid lines
         grid_interval = 10.0
@@ -380,7 +438,7 @@ class VelocityOverlay:
         while curr < max_val:
             y = graph_height - ((curr - min_val) / val_range * graph_height)
             if y >= 0 and y <= graph_height:
-                self.canvas.create_line(0, y, width, y, fill="#333333", dash=(4, 4))
+                canvas.create_line(0, y, width, y, fill="#333333", dash=(4, 4))
             curr += grid_interval
             
         # Negative grid
@@ -388,78 +446,93 @@ class VelocityOverlay:
         while curr > min_val:
             y = graph_height - ((curr - min_val) / val_range * graph_height)
             if y >= 0 and y <= graph_height:
-                self.canvas.create_line(0, y, width, y, fill="#333333", dash=(4, 4))
+                canvas.create_line(0, y, width, y, fill="#333333", dash=(4, 4))
             curr -= grid_interval
             
-        self.canvas.create_text(2, 2, anchor="nw", text=f"{max_val:.1f}", fill="#555555", font=("Arial", 8))
-        self.canvas.create_text(2, graph_height - 10, anchor="sw", text=f"{min_val:.1f}", fill="#555555", font=("Arial", 8))
+        canvas.create_text(width - 2, 2, anchor="ne", text=f"{max_val:.1f}", fill="#555555", font=("Arial", 8))
+        canvas.create_text(width - 2, graph_height - 10, anchor="se", text=f"{min_val:.1f}", fill="#555555", font=("Arial", 8))
 
-        # Helper to draw line
-        def plot_line(index, color):
-            points = []
-            for item in data:
-                t = item[0]
-                val = item[index]
-                if t < start_time: continue
-                x = (t - start_time) / self.history_duration * width
-                y = graph_height - ((val - min_val) / val_range * graph_height)
-                points.append(x)
-                points.append(y)
-            if len(points) >= 4:
-                self.canvas.create_line(points, fill=color, width=2)
-
-        if draw_x: plot_line(2, "#FF5555")
-        if draw_y: plot_line(3, "#55FF55")
-        if draw_z: plot_line(4, "#5555FF")
-        if draw_mag: plot_line(1, "#00FF00")
-
-        # 4. Find Peaks (Local Maxima) for Magnitude only if enabled, or just update peaks based on magnitude?
-        # User asked for "font size of the top speed in the graph", usually implying Magnitude.
-        # But if Mag is off, maybe show peaks for highest visible?
-        # Let's stick to Magnitude for peaks as that's "Top Speed".
-        
-        if draw_mag:
-            peaks = []
-            for i in range(1, len(data) - 1):
-                t = data[i][0]
-                s = data[i][1] # Magnitude
-                prev_s = data[i-1][1]
-                next_s = data[i+1][1]
-                
-                if s > prev_s and s > next_s and s > 1.0: 
+        # Plot Line
+        points = []
+        for item in data:
+            t = item[0]
+            val = item[data_index]
+            if t < start_time: continue
+            x = (t - start_time) / self.history_duration * width
+            y = graph_height - ((val - min_val) / val_range * graph_height)
+            points.append(x)
+            points.append(y)
+        if len(points) >= 4:
+            canvas.create_line(points, fill=color, width=2)
+            
+        # Draw Peaks
+        peaks = []
+        for i in range(1, len(data) - 1):
+            t = data[i][0]
+            s = data[i][data_index] # Use relevant index
+            prev_s = data[i-1][data_index]
+            next_s = data[i+1][data_index]
+            
+            # Simple peak detection: local maxima
+            # Only consider positive peaks for now, or abs magnitude?
+            # User wants peaks for "max speeds". For Vectors, maybe just positive?
+            # Or absolute max?
+            # Let's do raw value peaks.
+            if s > prev_s and s > next_s:
+                 # Check threshold to avoid noise
+                 if abs(s) > 1.0:
                     peaks.append((t, s))
+        
+        peaks.sort(key=lambda x: x[1], reverse=True)
+        
+        selected_peaks = []
+        update_rate = self.peak_update_rate.get()
+        
+        for p in peaks:
+            t, s = p
+            conflict = False
+            for sp in selected_peaks:
+                if abs(t - sp[0]) < update_rate: 
+                    conflict = True
+                    break
+            if not conflict:
+                selected_peaks.append(p)
+        
+        peak_font = ("Arial", self.font_size_peak.get(), "bold")
+        peak_decimals = self.precision_peak.get()
+        
+        for i, p in enumerate(selected_peaks):
+            t, s = p
+            if t < start_time: continue
             
-            peaks.sort(key=lambda x: x[1], reverse=True)
+            px = (t - start_time) / self.history_duration * width
+            py = graph_height - ((s - min_val) / val_range * graph_height)
             
-            selected_peaks = []
-            update_rate = self.peak_update_rate.get()
+            canvas.create_line(px, py, px, graph_height, fill="#FFFF00", dash=(2, 4))
             
-            for p in peaks:
-                t, s = p
-                conflict = False
-                for sp in selected_peaks:
-                    if abs(t - sp[0]) < update_rate: 
-                        conflict = True
-                        break
-                if not conflict:
-                    selected_peaks.append(p)
+            # Stagger labels across 3 rows to prevent overlap
+            row = i % 3
+            label_y = graph_height + 10 + (row * 10)
             
-            peak_font = ("Arial", self.font_size_peak.get(), "bold")
+            anchor = "center" 
+            if px < 20: anchor = "w"
+            elif px > width - 20: anchor = "e"
             
-            for t, s in selected_peaks:
-                if t < start_time: continue
-                
-                px = (t - start_time) / self.history_duration * width
-                py = graph_height - ((s - min_val) / val_range * graph_height)
-                
-                self.canvas.create_line(px, py, px, graph_height, fill="#FFFF00", dash=(2, 4))
-                
-                label_y = graph_height + 10 
-                anchor = "center" 
-                if px < 20: anchor = "w"
-                elif px > width - 20: anchor = "e"
-                
-                self.canvas.create_text(px, label_y, text=f"{s:.1f}", fill="#FFFF00", font=peak_font, anchor=anchor)
+            label_text = f"{s:.{peak_decimals}f}"
+            canvas.create_text(px, label_y, text=label_text, fill="#FFFF00", font=peak_font, anchor=anchor)
+
+
+    def draw_graph(self):
+        if not self.show_graph.get(): return
+        
+        if self.graph_show_mag.get():
+            self.draw_single_graph(self.canvas_mag, 1, "#00FF00", "MAGNITUDE")
+        if self.graph_show_x.get():
+            self.draw_single_graph(self.canvas_x, 2, "#FF5555", "X VELOCITY")
+        if self.graph_show_y.get():
+            self.draw_single_graph(self.canvas_y, 3, "#55FF55", "Y VELOCITY")
+        if self.graph_show_z.get():
+            self.draw_single_graph(self.canvas_z, 4, "#5555FF", "Z VELOCITY")
 
     def update(self):
         try:
@@ -491,10 +564,13 @@ class VelocityOverlay:
                     speed = math.sqrt(vx*vx + vy*vy + vz*vz)
                     
                     if speed < 100000:
-                        self.label_speed.config(text=f"{speed:.2f} m/s")
-                        self.label_vx.config(text=f"X: {vx:.2f}")
-                        self.label_vy.config(text=f"Y: {vy:.2f}")
-                        self.label_vz.config(text=f"Z: {vz:.2f}")
+                        prec_mag = self.precision_mag.get()
+                        prec_vec = self.precision_vec.get()
+                        
+                        self.label_speed.config(text=f"{speed:.{prec_mag}f} m/s")
+                        self.label_vx.config(text=f"X: {vx:.{prec_vec}f}")
+                        self.label_vy.config(text=f"Y: {vy:.{prec_vec}f}")
+                        self.label_vz.config(text=f"Z: {vz:.{prec_vec}f}")
                         # Store all components: time, speed, vx, vy, vz
                         self.history.append((current_time, speed, vx, vy, vz))
                     else:
@@ -511,7 +587,10 @@ class VelocityOverlay:
             self.history.popleft()
             
         self.draw_graph()
-        self.root.after(50, self.update)
+        # Use the configured polling rate
+        rate = self.polling_rate.get()
+        if rate < 10: rate = 10 # Safety limit
+        self.root.after(rate, self.update)
 
 if __name__ == "__main__":
     try:
