@@ -1,4 +1,4 @@
-# L8R SK8R Velocity Overlay
+# L8R SK8R Velocity Overlay (WIP)
 
 A lightweight velocity tracker overlay for L8R SK8R.
 
